@@ -1150,11 +1150,15 @@ extension Bundle {
     /// Safely load a NIB from the correct bundle with fallback logic
     /// This handles the case where CocoaPods integrates as source files vs framework
     static func nibBundle(forClass classType: AnyClass) -> Bundle {
+        return resolveNibBundle(nibName: String(describing: classType),
+                                classBundle: Bundle(for: classType),
+                                mainBundle: Bundle.main)
+    }
+    
+    /// Resolution core behind `nibBundle(forClass:)`, with the bundles injected so the
+    /// fallback chain can be covered by unit tests without a host app.
+    static func resolveNibBundle(nibName: String, classBundle: Bundle, mainBundle: Bundle) -> Bundle {
         // Primary: Bundle(for: class) - works for framework integration
-        let classBundle = Bundle(for: classType)
-        
-        // Check if the NIB exists in the class bundle
-        let nibName = String(describing: classType)
         if classBundle.path(forResource: nibName, ofType: "nib") != nil {
             return classBundle
         }
@@ -1169,8 +1173,8 @@ extension Bundle {
         }
         
         // Fallback: try main bundle (for source files integration mode)
-        if Bundle.main.path(forResource: nibName, ofType: "nib") != nil {
-            return Bundle.main
+        if mainBundle.path(forResource: nibName, ofType: "nib") != nil {
+            return mainBundle
         }
         
         // Last resort: return class bundle anyway (will crash with original error)
