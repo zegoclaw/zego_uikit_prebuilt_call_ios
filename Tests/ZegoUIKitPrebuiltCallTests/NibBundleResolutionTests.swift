@@ -224,4 +224,111 @@ final class NibBundleResolutionTests: XCTestCase {
 
         XCTAssertEqual(first.bundlePath, second.bundlePath)
     }
+
+    // MARK: - Source-vs-compiled nib suffix contract
+
+    /// Pins the contract that the resolver only looks for the compiled `.nib`
+    /// payload, not the source `.xib` placeholder that the podspec lists under
+    /// `resource_bundle`. Pods ship the compiled `.nib` next to the `.xib`, but
+    /// if a future change ever probed `.xib` it would mask real resolution
+    /// failures - this test guards that regression.
+    func testResolvesByNibOnlyAndIgnoresXibPlaceholder() throws {
+        let nibName = "ZegoCallInvitationDialog"
+        let classBundle = try makeBundle(named: "Framework", in: sandbox)
+        let mainBundle = try makeBundle(named: "Main", in: sandbox)
+
+        // Drop a `.xib` source placeholder in the resource bundle - this mimics
+        // what the 54fc915 podspec lists under `resource_bundle`. The resolver
+        // must NOT treat it as a hit.
+        let resourceBundle = try makeBundle(named: resourceBundleName,
+                                            in: URL(fileURLWithPath: try XCTUnwrap(classBundle.resourcePath)))
+        let resourceResourceDir = URL(fileURLWithPath: try XCTUnwrap(resourceBundle.resourcePath))
+        try FileManager.default.createDirectory(at: resourceResourceDir, withIntermediateDirectories: true)
+        try Data().write(to: resourceResourceDir.appendingPathComponent("\(nibName).xib"))
+
+        // Real `.nib` lives only in main bundle (source files integration).
+        try placeNib(nibName, in: mainBundle)
+
+        let resolved = Bundle.resolveNibBundle(nibName: nibName,
+                                               classBundle: classBundle,
+                                               mainBundle: mainBundle)
+
+        XCTAssertEqual(resolved.bundlePath, mainBundle.bundlePath,
+                       "resolver must skip .xib source and land on the compiled .nib in main bundle")
+        XCTAssertNotNil(resolved.path(forResource: nibName, ofType: "nib"))
+    }
+
+    // MARK: - In-process / shared bundle edge case
+
+    /// When the host app is itself the framework target (e.g. an example app
+    /// that links the SDK as source files in the same module), `Bundle(for:)`
+    /// and `Bundle.main` can resolve to the same bundle. The helper must not
+    /// double-traverse or recurse in that scenario - it just returns whichever
+    /// one actually holds the nib.
+    func testClassBundleAndMainBundleAreSameInstance() throws {
+        let nibName = "ZegoUIKitPrebuiltCallWaitingVC"
+        let shared = try makeBundle(named: "Shared", in: sandbox)
+        try placeNib(nibName, in: shared)
+
+        let resolved = Bundle.resolveNibBundle(nibName: nibName,
+                                               classBundle: shared,
+                                               mainBundle: shared)
+
+        XCTAssertEqual(resolved.bundlePath, shared.bundlePath)
+        XCTAssertNotNil(resolved.path(forResource: nibName, ofType: "nib"))
+
+        // And when the shared bundle also lacks the nib, the helper must still
+        // hand back that single bundle (no loop, no nil, no crash).
+        let empty = try makeBundle(named: "SharedEmpty", in: sandbox)
+        let resolvedEmpty = Bundle.resolveNibBundle(nibName: nibName,
+                                                    classBundle: empty,
+                                                    mainBundle: empty)
+        XCTAssertEqual(resolvedEmpty.bundlePath, empty.bundlePath)
+        XCTAssertNil(resolvedEmpty.path(forResource: nibName, ofType: "nib"))
+    }
+
+    // MARK: - Empty nib name
+
+    /// Characterization test: the helper does not special-case the empty
+    /// nib name - it relies on `path(forResource:ofType:)` returning nil and
+    /// falling through. This test pins that behavior so a future \"guard\"
+    /// change would have to be a deliberate update, not an accidental one.
+    func testEmptyNibNameFallsThroughToClassBundle() throws {
+        let nibName = ""
+        let classBundle = try makeBundle(named: "Framework", in: sandbox)
+        let mainBundle = try makeBundle(named: "Main", in: sandbox)
+
+        let resolved = Bundle.resolveNibBundle(nibName: nibName,
+                                               classBundle: classBundle,
+                                               mainBundle: mainBundle)
+
+        XCTAssertEqual(resolved.bundlePath, classBundle.bundlePath,
+                       "empty nib name must fall through every check and return class bundle")
+        XCTAssertNil(resolved.path(forResource: nibName, ofType: "nib"))
+    }
+
+    // MARK: - Precedence: both bundles carry the same nib
+
+    /// Re-asserts the framework-first ordering when BOTH the class bundle and
+    /// the nested resource bundle carry a copy of the same nib. Pinned against
+    /// a hypothetical future change that might reorder the chain for
+    /// \"performance\" - framework integration is the supported happy path and
+    /// must keep winning.
+    func testPicksClassBundleWhenBothClassAndResourceBundleContainSameNib() throws {
+        let nibName = "ZegoCallInvitationDialog"
+        let classBundle = try makeBundle(named: "Framework", in: sandbox)
+        let mainBundle = try makeBundle(named: "Main", in: sandbox)
+        let resourceBundle = try makeBundle(named: resourceBundleName,
+                                            in: URL(fileURLWithPath: try XCTUnwrap(classBundle.resourcePath)))
+        try placeNib(nibName, in: classBundle)
+        try placeNib(nibName, in: resourceBundle)
+
+        let resolved = Bundle.resolveNibBundle(nibName: nibName,
+                                               classBundle: classBundle,
+                                               mainBundle: mainBundle)
+
+        XCTAssertEqual(resolved.bundlePath, classBundle.bundlePath,
+                       "class bundle must win over nested resource bundle when both carry the nib")
+        XCTAssertNotNil(resolved.path(forResource: nibName, ofType: "nib"))
+    }
 }
